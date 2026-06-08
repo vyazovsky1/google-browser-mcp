@@ -69,7 +69,7 @@ async def drive_fetch(
     Args:
         file_id: The Drive file id (from ``drive_search``).
         dest_dir: Destination directory. Defaults to the configured download dir.
-        export_format: Export format for Google-native docs (e.g. ``pdf``,
+        export_format: Export format for Google-native docs (e.g. ``txt``,``pdf``,
             ``docx``, ``xlsx``). Use the ``export_format`` hint from search.
         mime_type: The file's mime type (from search); lets fetch pick the right
             export endpoint. Omit for binary files.

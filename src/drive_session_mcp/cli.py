@@ -145,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     fc = sub.add_parser("fetch", help="download one file by id")
     fc.add_argument("--id", required=True, help="Drive file id (from `search`)")
     fc.add_argument("--dest", help="destination dir (defaults to configured download dir)")
-    fc.add_argument("--format", dest="fmt", help="export format for native docs (pdf/docx/xlsx)")
+    fc.add_argument("--format", dest="fmt", help="export format for native docs (pdf/docx/xlsx/txt)")
     fc.add_argument("--mime", help="file mime type (lets fetch pick the export endpoint)")
 
     st = sub.add_parser("selftest", help="headless search+fetch smoke test")
