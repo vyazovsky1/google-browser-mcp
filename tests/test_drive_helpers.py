@@ -178,6 +178,28 @@ def test_cache_key_includes_format():
     assert drive._cache_key("ABC", None) == "ABC:raw"
 
 
+def test_original_name_from_headers():
+    # The real Drive export header: sanitized `filename=` + encoded `filename*`.
+    cd = (
+        'attachment; filename="DailyStandup-NotesbyGemini.txt"; '
+        "filename*=UTF-8''Daily%20Standup%20-%202026%2F06%2F08%20-%20Notes.txt"
+    )
+    headers = {"content-disposition": cd}
+    # `name` is the decoded original title; `file` is the safe on-disk name.
+    assert drive._original_name_from_headers(headers) == (
+        "Daily Standup - 2026/06/08 - Notes.txt"
+    )
+    assert drive._filename_from_headers(headers, "x") == "DailyStandup-NotesbyGemini.txt"
+
+
+def test_original_name_absent_returns_none():
+    assert drive._original_name_from_headers({}) is None
+    # Only a plain filename, no extended field -> no original title available.
+    assert drive._original_name_from_headers(
+        {"content-disposition": 'attachment; filename="a.txt"'}
+    ) is None
+
+
 def test_metadata_roundtrip(tmp_path):
     path = drive._metadata_path(tmp_path)
     data = {"ABC:pdf": {"id": "ABC", "name": "Report.pdf"}}

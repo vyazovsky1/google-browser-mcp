@@ -83,11 +83,12 @@ async def drive_fetch(
         modified: The file's ``modified`` ("date updated") value from search.
             When provided, a cached copy is reused only if its recorded value
             matches, so an updated document is re-downloaded.
-        name: The original Drive document name (from ``drive_search``). Recorded
-            in the manifest alongside the cached filename on disk.
+        name: The original Drive document name (from ``drive_search``). When
+            omitted it is recovered from the download's content-disposition.
 
-    Returns ``{path, bytes, format, exported, id, url, modified, fetched_at,
-    cached}`` (``cached`` is True when served from the local manifest).
+    Returns ``{path, bytes, format, exported, id, url, name, modified,
+    fetched_at, cached}`` (``cached`` is True when served from the local
+    manifest).
     """
     return await drive.fetch(
         _session(ctx),

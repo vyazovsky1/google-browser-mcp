@@ -310,6 +310,26 @@ def _filename_from_headers(headers: dict, fallback: str) -> str:
     return fallback
 
 
+# The extended `filename*` (RFC 5987) carries the unsanitized original document
+# title; the plain `filename=` above is the filesystem-safe on-disk name.
+_CD_FILENAME_EXT = re.compile(r"filename\*=(?:UTF-8'')?([^;]+)", re.IGNORECASE)
+
+
+def _original_name_from_headers(headers: dict) -> str | None:
+    """Return the original Drive document name from content-disposition, or None.
+
+    A browser fetch does not expose the document's modified time, but it does
+    carry the real title in the `filename*` field (percent-encoded).
+    """
+    from urllib.parse import unquote
+
+    cd = headers.get("content-disposition", "") or ""
+    m = _CD_FILENAME_EXT.search(cd)
+    if not m:
+        return None
+    return unquote(m.group(1).strip().strip('"')) or None
+
+
 def _resolve_export(mime_type: str | None, export_format: str | None):
     """Return (is_export, fmt, url_template) for a fetch request."""
     if mime_type and mime_type in GOOGLE_NATIVE:
@@ -343,12 +363,13 @@ async def fetch(
     dir. A repeat fetch of the same file returns the existing local copy without
     re-downloading, as long as the file is still on disk and -- when `modified`
     ("date updated") is supplied -- it matches the recorded value. `name` is the
-    original Drive document name, recorded in the manifest alongside the cached
-    filename on disk.
+    original Drive document name; when omitted it is recovered from the download's
+    content-disposition. `modified` is only ever caller-supplied -- a browser
+    fetch does not expose it. Manifest keys that resolve to None are dropped.
 
-    Returns ``{path, bytes, format, exported, id, url, modified, fetched_at,
-    cached}``. Raises SessionExpiredError if the server hands back a login page
-    instead of file content.
+    Returns ``{path, bytes, format, exported, id, url, name, modified,
+    fetched_at, cached}``. Raises SessionExpiredError if the server hands back a
+    login page instead of file content.
     """
     dest = Path(dest_dir).expanduser() if dest_dir else config.download_dir()
     dest.mkdir(parents=True, exist_ok=True)
@@ -375,6 +396,7 @@ async def fetch(
             "exported": fmt is not None,
             "id": record.get("id", file_id),
             "url": record.get("url", url),
+            "name": record.get("name"),
             "modified": record.get("modified"),
             "fetched_at": record.get("fetched_at"),
             "cached": True,
@@ -409,17 +431,23 @@ async def fetch(
     out = dest / cached_file
     out.write_bytes(body)
 
+    # `name` (original Drive title) comes from the caller or the content-
+    # disposition; `modified` is only ever caller-supplied (a browser fetch does
+    # not expose it). Keys that resolve to None are dropped from the manifest.
+    original_name = name or _original_name_from_headers(headers)
+
     fetched_at = _now_iso()
-    manifest[key] = {
+    record = {
         "id": file_id,
         "url": url,
         "modified": modified,
         "fetched_at": fetched_at,
-        "name": name,
+        "name": original_name,
         "file": cached_file,
         "bytes": len(body),
         "format": fmt,
     }
+    manifest[key] = {k: v for k, v in record.items() if v is not None}
     _save_metadata(meta_path, manifest)
 
     return {
@@ -429,6 +457,7 @@ async def fetch(
         "exported": is_export,
         "id": file_id,
         "url": url,
+        "name": original_name,
         "modified": modified,
         "fetched_at": fetched_at,
         "cached": False,
