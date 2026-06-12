@@ -6,16 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from drive_session_mcp import config, drive, errors
+from google_session_mcp import config, drive, errors
 
 
 # --------------------------------------------------------------------------- #
-# error hierarchy (CLI relies on these being DriveError subclasses)
+# error hierarchy
 # --------------------------------------------------------------------------- #
 def test_fetch_errors_are_drive_errors():
     assert issubclass(errors.FileNotFoundError, errors.DriveError)
     assert issubclass(errors.AccessDeniedError, errors.DriveError)
-    assert issubclass(errors.DriveError, RuntimeError)
+    assert issubclass(errors.DriveError, errors.GoogleError)
+    assert issubclass(errors.GoogleError, RuntimeError)
 
 
 # --------------------------------------------------------------------------- #
@@ -45,7 +46,6 @@ def test_search_url_encodes():
 # --------------------------------------------------------------------------- #
 # SearchItems protobuf-JSON parsing + normalization
 # --------------------------------------------------------------------------- #
-# A row is positional: [id, parents, name, mime, ..., modified_ms@10, ...].
 def _row(id_, name, mime, *, parents=None, modified_ms=None):
     r = [None] * 11
     r[0] = id_
@@ -78,7 +78,6 @@ def test_find_rows_extracts_nested_items():
 
 
 def test_find_rows_ignores_non_rows():
-    # Nested arrays with no id-like [0]/name/mime triple must not be matched.
     data = [[None, "x", 5], [[[None] * 12]], "short"]
     out = []
     drive.find_rows(data, out)
@@ -97,7 +96,7 @@ def test_normalize_document_gets_export_hint_and_iso_date():
     assert out["name"] == "Plan"
     assert out["export_format"] == "pdf"
     assert out["owner"] is None
-    assert out["modified"].startswith("2026-")  # epoch ms -> ISO
+    assert out["modified"].startswith("2026-")
 
 
 def test_normalize_binary_has_no_export_hint():
@@ -141,7 +140,7 @@ def test_resolve_export_binary():
 def test_resolve_export_unknown_mime_but_format_requested():
     is_export, fmt, tmpl = drive._resolve_export(None, "pdf")
     assert (is_export, fmt) == (True, "pdf")
-    assert "document" in tmpl  # falls back to the document export template
+    assert "document" in tmpl
 
 
 # --------------------------------------------------------------------------- #
@@ -179,13 +178,11 @@ def test_cache_key_includes_format():
 
 
 def test_original_name_from_headers():
-    # The real Drive export header: sanitized `filename=` + encoded `filename*`.
     cd = (
         'attachment; filename="DailyStandup-NotesbyGemini.txt"; '
         "filename*=UTF-8''Daily%20Standup%20-%202026%2F06%2F08%20-%20Notes.txt"
     )
     headers = {"content-disposition": cd}
-    # `name` is the decoded original title; `file` is the safe on-disk name.
     assert drive._original_name_from_headers(headers) == (
         "Daily Standup - 2026/06/08 - Notes.txt"
     )
@@ -194,7 +191,6 @@ def test_original_name_from_headers():
 
 def test_original_name_absent_returns_none():
     assert drive._original_name_from_headers({}) is None
-    # Only a plain filename, no extended field -> no original title available.
     assert drive._original_name_from_headers(
         {"content-disposition": 'attachment; filename="a.txt"'}
     ) is None
@@ -217,9 +213,7 @@ def test_load_metadata_missing_or_corrupt(tmp_path):
 def test_is_fresh_hit_when_file_present(tmp_path):
     (tmp_path / "Report.pdf").write_text("x", encoding="utf-8")
     record = {"file": "Report.pdf", "modified": "2026-05-01T00:00:00+00:00"}
-    # No modified supplied -> presence is enough.
     assert drive._is_fresh(record, tmp_path, None) is True
-    # Matching modified -> hit.
     assert drive._is_fresh(record, tmp_path, "2026-05-01T00:00:00+00:00") is True
 
 
@@ -252,7 +246,7 @@ def test_config_defaults_exist(monkeypatch):
     monkeypatch.delenv(config.ENV_PROFILE, raising=False)
     monkeypatch.delenv(config.ENV_DOWNLOAD_DIR, raising=False)
     assert config.profile_dir().name == "profile"
-    assert config.download_dir().name == "drive-session-mcp"
+    assert config.download_dir().name == "google-session-mcp"
 
 
 if __name__ == "__main__":
