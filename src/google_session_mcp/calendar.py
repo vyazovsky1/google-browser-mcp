@@ -187,9 +187,14 @@ async def list_events(
 
     # Navigate week-by-week: the week view is what triggers `minievents`.
     # Build a list of Monday-anchored week starts covering [start_dt, end_dt].
+    #
+    # IMPORTANT: `minievents` returns the SURROUNDING weeks (past + next) but
+    # NOT the currently-displayed week — that comes from sync.fetcheventrange.
+    # Adding one extra week after end_dt ensures the last desired week's events
+    # are included in the following week's minievents "past" payload.
     week_starts: list[datetime] = []
     cur = start_dt - timedelta(days=start_dt.weekday())  # Monday of start week
-    while cur <= end_dt:
+    while cur <= end_dt + timedelta(weeks=1):             # +1 to capture last week
         week_starts.append(cur)
         cur += timedelta(weeks=1)
 
@@ -570,41 +575,51 @@ async def get_event(
     Returns a dict with: ``title``, ``when``, ``meet_link``, ``phone``,
     ``location``, ``organizer``, ``attendees``, ``description``.
     """
-    # Derive the week to navigate to: prefer explicit start, fall back to id suffix.
+    from datetime import timedelta
+
+    # Derive candidate weeks to search. Prefer explicit start or id suffix;
+    # fall back to current date ± 8 weeks to handle one-time events with no suffix.
+    candidate_weeks: list[str] = []
+
     m = _EVENT_DATE_RE.search(event_id)
     if m:
         date_str = m.group(1)
-        year, month, day = int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8])
+        y, mo, d = int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8])
+        candidate_weeks.append(f"{CALENDAR_BASE}/week/{y}/{mo}/{d}")
     elif start:
         try:
             dt = _parse_date(start)
-            year, month, day = dt.year, dt.month, dt.day
+            candidate_weeks.append(f"{CALENDAR_BASE}/week/{dt.year}/{dt.month}/{dt.day}")
         except ValueError as exc:
             raise CalendarError(f"Invalid start date {start!r}: {exc}") from exc
     else:
-        raise CalendarError(
-            f"Cannot determine week for event_id {event_id!r}: no date suffix. "
-            "Pass start=<ISO date from calendar_list_events>."
-        )
-    week_url = f"{CALENDAR_BASE}/week/{year}/{month}/{day}"
+        # No hint — scan current week and the next 8 weeks (covers ~2 months).
+        today = datetime.now()
+        monday = today - timedelta(days=today.weekday())
+        for i in range(9):
+            w = monday + timedelta(weeks=i)
+            candidate_weeks.append(f"{CALENDAR_BASE}/week/{w.year}/{w.month}/{w.day}")
 
     async with session.lock:
         ctx  = await session.context()
         page = await session.page()
 
-        await page.goto(week_url, wait_until="domcontentloaded")
-        if any(m2 in page.url for m2 in LOGIN_HOST_MARKERS):
-            raise SessionExpiredError(
-                "Calendar redirected to login. Run `google-browser-mcp login`."
-            )
-        await page.wait_for_timeout(settle_ms)
+        clicked = None
+        for week_url in candidate_weeks:
+            await page.goto(week_url, wait_until="domcontentloaded")
+            if any(m2 in page.url for m2 in LOGIN_HOST_MARKERS):
+                raise SessionExpiredError(
+                    "Calendar redirected to login. Run `google-browser-mcp login`."
+                )
+            await page.wait_for_timeout(settle_ms)
+            clicked = await page.evaluate(_FIND_AND_CLICK_CHIP_JS, event_id)
+            if clicked:
+                break
 
-        clicked = await page.evaluate(_FIND_AND_CLICK_CHIP_JS, event_id)
         if not clicked:
             raise CalendarError(
-                f"Event chip '{event_id}' not found in the week view "
-                f"({year}-{month:02d}-{day:02d}). "
-                "The event may be outside the visible calendar range."
+                f"Event chip '{event_id}' not found in any searched week. "
+                "Try passing start=<ISO date from calendar_list_events>."
             )
         await page.wait_for_timeout(2000)
 
