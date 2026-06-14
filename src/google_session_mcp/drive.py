@@ -25,23 +25,16 @@ from .errors import (
 
 SEARCH_URL = "https://drive.google.com/drive/search?q={q}"
 
-# The Drive web app fetches search results from this internal RPC. It returns
-# "application/json+protobuf" -- a nested *positional* JSON array (not an object
-# with an `items` key). Field positions confirmed by recon against the live tenant.
 SEARCH_RPC_MARKER = "SearchItems"
 
-# Positional indices within a SearchItems result row.
 _ROW_ID = 0
 _ROW_PARENTS = 1
 _ROW_NAME = 2
 _ROW_MIME = 3
 _ROW_MODIFIED_MS = 10
 
-# A Drive file id is a longish base64url-ish token; used to recognize result rows
-# inside the otherwise-unlabeled protobuf-JSON array.
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{20,}$")
 
-# Google-native mime -> (default export format, export URL template).
 GOOGLE_NATIVE: dict[str, tuple[str, str]] = {
     "application/vnd.google-apps.document": (
         "pdf",
@@ -57,19 +50,10 @@ GOOGLE_NATIVE: dict[str, tuple[str, str]] = {
     ),
 }
 
-# Default template used when an export is requested but the mime type is unknown.
 _DEFAULT_EXPORT_TMPL = GOOGLE_NATIVE["application/vnd.google-apps.document"][1]
 
 
-# --------------------------------------------------------------------------- #
-# Query building
-# --------------------------------------------------------------------------- #
 def build_query(query: str, filters: dict[str, Any] | None = None) -> str:
-    """Compose a Drive search `q=` expression from free text + structured filters.
-
-    Known filter keys map to Drive search operators; unknown keys pass through as
-    `key:value`. `query` may already contain operators and is kept verbatim.
-    """
     parts: list[str] = []
     if query and query.strip():
         parts.append(query.strip())
@@ -84,11 +68,7 @@ def search_url(query: str, filters: dict[str, Any] | None = None) -> str:
     return SEARCH_URL.format(q=quote(build_query(query, filters)))
 
 
-# --------------------------------------------------------------------------- #
-# SearchItems protobuf-JSON parsing
-# --------------------------------------------------------------------------- #
 def parse_protojson(body: bytes) -> Any:
-    """Decode a Google "json+protobuf" body, stripping the XSSI prefix."""
     raw = body.decode("utf-8", "ignore")
     for prefix in (")]}'\n", ")]}'"):
         if raw.startswith(prefix):
@@ -101,7 +81,6 @@ def parse_protojson(body: bytes) -> Any:
 
 
 def _looks_like_row(node: Any) -> bool:
-    """True if `node` is a SearchItems result row: [id, parents, name, mime, ...]."""
     return (
         isinstance(node, list)
         and len(node) > _ROW_MIME
@@ -114,7 +93,6 @@ def _looks_like_row(node: Any) -> bool:
 
 
 def find_rows(node: Any, out: list[list]) -> None:
-    """Recursively collect result rows from the nested protobuf-JSON array."""
     if _looks_like_row(node):
         out.append(node)
     elif isinstance(node, list):
@@ -126,7 +104,6 @@ def _ms_to_iso(value: Any) -> str | None:
     if not isinstance(value, (int, float)) or value <= 0:
         return None
     from datetime import datetime, timezone
-
     return datetime.fromtimestamp(value / 1000, tz=timezone.utc).isoformat()
 
 
@@ -138,11 +115,6 @@ def _folder_of_row(row: list) -> str | None:
 
 
 def normalize_row(row: list) -> dict[str, Any]:
-    """Map a positional SearchItems row to our stable metadata shape.
-
-    Owner is not carried inline in the search response (it appears only as a
-    person-id reference), so it is reported as None for now.
-    """
     mime = row[_ROW_MIME] if len(row) > _ROW_MIME else ""
     native = GOOGLE_NATIVE.get(mime)
     modified = row[_ROW_MODIFIED_MS] if len(row) > _ROW_MODIFIED_MS else None
@@ -157,22 +129,14 @@ def normalize_row(row: list) -> dict[str, Any]:
     }
 
 
-# --------------------------------------------------------------------------- #
-# Login-page detection (port of probe.looks_like_login_page)
-# --------------------------------------------------------------------------- #
 def looks_like_login_page(body: bytes, headers: dict) -> bool:
     ctype = (headers.get("content-type", "") or "").lower()
     if "text/html" not in ctype:
         return False
     head = body[:4000].decode("utf-8", "ignore").lower()
-    return any(
-        m in head for m in ("sign in", "accounts.google.com", "couldn't sign you in")
-    )
+    return any(m in head for m in ("sign in", "accounts.google.com", "couldn't sign you in"))
 
 
-# --------------------------------------------------------------------------- #
-# search
-# --------------------------------------------------------------------------- #
 DEFAULT_SEARCH_LIMIT = 20
 
 
@@ -184,14 +148,6 @@ async def search(
     limit: int = DEFAULT_SEARCH_LIMIT,
     settle_ms: int = 6000,
 ) -> list[dict[str, Any]]:
-    """Search Drive and return up to `limit` normalized file metadata rows.
-
-    Navigates the headless page to the Drive search URL and intercepts the
-    internal SearchItems RPC response (protobuf-JSON), which is the call that
-    carries the result rows. Drive returns one page of rows per RPC; when more
-    than that are requested, the results list is scrolled to trigger further
-    SearchItems calls until `limit` rows are collected (or no more arrive).
-    """
     limit = max(1, int(limit))
     async with session.lock:
         ctx = await session.context()
@@ -223,11 +179,10 @@ async def search(
             await page.goto(search_url(query, filters), wait_until="domcontentloaded")
             if any(m in page.url for m in LOGIN_HOST_MARKERS):
                 raise SessionExpiredError(
-                    "Drive redirected to login. Run `drive-session-mcp login` and retry."
+                    "Drive redirected to login. Run `google-browser-mcp login` and retry."
                 )
             await page.wait_for_timeout(settle_ms)
 
-            # Scroll to load more pages until we have `limit` rows or growth stops.
             stagnant = 0
             while len(rows) < limit and stagnant < 3:
                 before = len(rows)
@@ -241,14 +196,6 @@ async def search(
         return [normalize_row(r) for r in rows[:limit]]
 
 
-# --------------------------------------------------------------------------- #
-# fetch metadata cache
-# --------------------------------------------------------------------------- #
-# A single manifest per download dir, keyed by "<file_id>:<fmt>", records what
-# was fetched so a repeat fetch of an unchanged file returns the local copy
-# instead of re-downloading. Each record stores `name` (the original Drive
-# document name) and `file` (the cached filename on disk, not an absolute path):
-# the manifest lives in the download dir, so the file resolves as dest / file.
 METADATA_FILENAME = ".drive_metadata.json"
 
 
@@ -257,7 +204,6 @@ def _metadata_path(dest: Path) -> Path:
 
 
 def _load_metadata(path: Path) -> dict[str, Any]:
-    """Load the manifest, tolerating a missing or corrupt file (-> {})."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -274,12 +220,6 @@ def _cache_key(file_id: str, fmt: str | None) -> str:
 
 
 def _is_fresh(record: Any, dest: Path, modified: str | None) -> bool:
-    """True if `record` can satisfy a fetch without re-downloading.
-
-    Requires the record to exist and its file to still be on disk under `dest`.
-    When a `modified` ("date updated") value is supplied it must match the stored
-    one; when omitted, presence + file-on-disk is treated as a hit.
-    """
     if not isinstance(record, dict):
         return False
     file = record.get("file")
@@ -292,13 +232,9 @@ def _is_fresh(record: Any, dest: Path, modified: str | None) -> bool:
 
 def _now_iso() -> str:
     from datetime import datetime, timezone
-
     return datetime.now(tz=timezone.utc).isoformat()
 
 
-# --------------------------------------------------------------------------- #
-# fetch
-# --------------------------------------------------------------------------- #
 _CD_FILENAME = re.compile(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)\"?", re.IGNORECASE)
 
 
@@ -310,19 +246,11 @@ def _filename_from_headers(headers: dict, fallback: str) -> str:
     return fallback
 
 
-# The extended `filename*` (RFC 5987) carries the unsanitized original document
-# title; the plain `filename=` above is the filesystem-safe on-disk name.
 _CD_FILENAME_EXT = re.compile(r"filename\*=(?:UTF-8'')?([^;]+)", re.IGNORECASE)
 
 
 def _original_name_from_headers(headers: dict) -> str | None:
-    """Return the original Drive document name from content-disposition, or None.
-
-    A browser fetch does not expose the document's modified time, but it does
-    carry the real title in the `filename*` field (percent-encoded).
-    """
     from urllib.parse import unquote
-
     cd = headers.get("content-disposition", "") or ""
     m = _CD_FILENAME_EXT.search(cd)
     if not m:
@@ -331,18 +259,14 @@ def _original_name_from_headers(headers: dict) -> str | None:
 
 
 def _resolve_export(mime_type: str | None, export_format: str | None):
-    """Return (is_export, fmt, url_template) for a fetch request."""
     if mime_type and mime_type in GOOGLE_NATIVE:
         default_fmt, tmpl = GOOGLE_NATIVE[mime_type]
         return True, (export_format or default_fmt), tmpl
     if export_format:
-        # Export requested but mime unknown -> assume a document-style export.
         return True, export_format, _DEFAULT_EXPORT_TMPL
     return False, None, None
 
 
-# Exports redirect to googleusercontent.com and can be slow for large files, so
-# allow well beyond Playwright's 30s default.
 FETCH_TIMEOUT_MS = 180_000
 
 
@@ -357,20 +281,6 @@ async def fetch(
     *,
     timeout_ms: int = FETCH_TIMEOUT_MS,
 ) -> dict[str, Any]:
-    """Download one file to disk, auto-exporting Google-native docs.
-
-    Caches each fetch in a ``.drive_metadata.json`` manifest in the destination
-    dir. A repeat fetch of the same file returns the existing local copy without
-    re-downloading, as long as the file is still on disk and -- when `modified`
-    ("date updated") is supplied -- it matches the recorded value. `name` is the
-    original Drive document name; when omitted it is recovered from the download's
-    content-disposition. `modified` is only ever caller-supplied -- a browser
-    fetch does not expose it. Manifest keys that resolve to None are dropped.
-
-    Returns ``{path, bytes, format, exported, id, url, name, modified,
-    fetched_at, cached}``. Raises SessionExpiredError if the server hands back a
-    login page instead of file content.
-    """
     dest = Path(dest_dir).expanduser() if dest_dir else config.download_dir()
     dest.mkdir(parents=True, exist_ok=True)
 
@@ -383,7 +293,6 @@ async def fetch(
         url = f"https://drive.google.com/uc?id={file_id}&export=download"
         fallback_name = file_id
 
-    # Cache check: if a matching, still-present copy is on record, return it.
     meta_path = _metadata_path(dest)
     manifest = _load_metadata(meta_path)
     key = _cache_key(file_id, fmt)
@@ -410,17 +319,15 @@ async def fetch(
     if looks_like_login_page(body, headers):
         raise SessionExpiredError(
             "Got a login page instead of file content. "
-            "Run `drive-session-mcp login` and retry."
+            "Run `google-browser-mcp login` and retry."
         )
     if resp.status == 404:
         raise FileNotFoundError(
-            f"No Drive file with id '{file_id}' (HTTP 404). "
-            "Check the id - copy it from `drive-session-mcp search`."
+            f"No Drive file with id '{file_id}' (HTTP 404)."
         )
     if resp.status == 403:
         raise AccessDeniedError(
-            f"Access denied to file '{file_id}' (HTTP 403). "
-            "Your account may not have permission to open it."
+            f"Access denied to file '{file_id}' (HTTP 403)."
         )
     if not resp.ok or len(body) <= 256:
         raise DriveError(
@@ -431,11 +338,7 @@ async def fetch(
     out = dest / cached_file
     out.write_bytes(body)
 
-    # `name` (original Drive title) comes from the caller or the content-
-    # disposition; `modified` is only ever caller-supplied (a browser fetch does
-    # not expose it). Keys that resolve to None are dropped from the manifest.
     original_name = name or _original_name_from_headers(headers)
-
     fetched_at = _now_iso()
     record = {
         "id": file_id,
