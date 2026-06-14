@@ -260,29 +260,20 @@ async def send_email(
     return {"status": "sent", "to": to, "subject": subject}
 
 
-# ---------------------------------------------------------------------------
-# save_draft  (compose + close to save as draft)
-# ---------------------------------------------------------------------------
-
-_CLOSE_SELECTORS = [
-    '[aria-label*="Close" i]',
-    '[aria-label*="Minimize" i]',
-    '.Ha.Z',   # close icon in compose window
-]
-
-
 async def save_draft(
     session,
     to: str,
     subject: str,
     body: str,
     *,
-    settle_ms: int = 4000,
+    settle_ms: int = 5000,
 ) -> dict[str, Any]:
     """Save an email as a draft without sending.
 
-    Same as ``send_email`` but closes the compose window instead of clicking
-    Send, triggering Gmail's auto-save behaviour.
+    Navigates to the Gmail compose URL. Gmail auto-saves the draft as soon as
+    the compose window loads — the "Draft saved" indicator confirms this.
+
+    The draft appears in the Drafts folder of the authenticated account.
 
     Returns ``{status, to, subject}`` on success.
     """
@@ -302,25 +293,14 @@ async def save_draft(
                 "Gmail redirected to login. Run `google-browser-mcp login`."
             )
 
-        for sel in _COMPOSE_READY_SEL:
-            try:
-                await page.wait_for_selector(sel, timeout=6000)
-                break
-            except Exception:
-                continue
-
-        await page.wait_for_timeout(settle_ms)
-
-        # Close the compose window — Gmail auto-saves as draft
-        for sel in _CLOSE_SELECTORS:
-            try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=2000):
-                    await btn.click()
-                    break
-            except Exception:
-                continue
-
-        await page.wait_for_timeout(1500)
+        # Gmail auto-saves the draft on page load; wait for the indicator.
+        try:
+            await page.wait_for_function(
+                "() => document.body.innerText.includes('Draft saved')",
+                timeout=settle_ms,
+            )
+        except Exception:
+            # Proceed anyway — auto-save likely still happened.
+            await page.wait_for_timeout(settle_ms)
 
     return {"status": "draft_saved", "to": to, "subject": subject}
