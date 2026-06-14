@@ -14,14 +14,8 @@
 - Entry point renamed `drive-session-mcp` → `google-browser-mcp`
 - Env vars renamed `DRIVE_MCP_*` → `GOOGLE_MCP_*`
 - Profile/download dirs renamed `drive-session-mcp` → `google-session-mcp`
-- Error hierarchy: `DriveError` now inherits from new `GoogleError` base; added `CalendarError`, `GmailError`
 
-### Fixed
-- Calendar: navigate week-by-week (not month view) — month view does not trigger `minievents`
-- Gmail: thread ID is on a child `span[data-legacy-thread-id]`, not the `tr` row
-- Gmail: do not percent-encode search query in hash fragment (broke operators like `in:inbox`)
-
-## v0.1.0 — 2026-05-01
+## v0.1.0 — 2026-06-01
 
 ### Added
 - Initial release: `drive_search` and `drive_fetch` MCP tools
