@@ -57,6 +57,7 @@ def _print_events(events: list[dict]) -> None:
         vc      = " [video]" if e.get("has_video_conf") else ""
         rsvp    = f"  rsvp={e['rsvp']}" if e.get("rsvp") else ""
         print(f"  - {e['title']}{all_day}{vc}")
+        print(f"      id={e.get('id')}")
         print(f"      {e.get('start', '')} -> {e.get('end', '')}{rsvp}")
         if e.get("description"):
             print(f"      {e['description'][:80]}")
