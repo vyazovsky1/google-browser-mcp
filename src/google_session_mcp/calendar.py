@@ -470,11 +470,14 @@ _SKIP_LINES = {
     "copy guest emails", "copy conference info", "join by phone",
     "join with google meet", "more phone numbers",
     "gemini meeting notes are off", "ask the organizer to turn them on",
-    "home", "office", "optional", "event",
-    # meeting-notes section noise
-    "description", "description:", "notes",
+    "home", "office", "optional", "event", "event_busy",
+    "out of office", "in a meeting room", "virtually",
+    # meeting-notes / Gemini section noise
+    "description", "description:", "notes", "pen_spark",
     "take meeting notes", "start a new document to capture notes",
-    "more meeting notes options",
+    "more meeting notes options", "keyboard_arrow_down",
+    "gemini will take meeting notes",
+    "notes and transcript will be shared based on your settings",
 }
 _SKIP_PREFIXES = (
     "15 minutes", "outside working hours", "declined because",
@@ -622,6 +625,24 @@ async def get_event(
                 "Try passing start=<ISO date from calendar_list_events>."
             )
         await page.wait_for_timeout(2000)
+
+        # Expand the guest list if it is collapsed. Calendar renders the expand
+        # arrow as an icon element whose textContent is "keyboard_arrow_down";
+        # it may not have role=button so we walk all elements in the popup.
+        await page.evaluate("""() => {
+            const d = document.querySelector('[role=dialog]');
+            if (!d) return;
+            const walker = document.createTreeWalker(d, NodeFilter.SHOW_ELEMENT);
+            while (walker.nextNode()) {
+                const el = walker.currentNode;
+                const t  = el.textContent.trim();
+                if (t === 'keyboard_arrow_down' || t === 'expand_more') {
+                    el.click();
+                    return;
+                }
+            }
+        }""")
+        await page.wait_for_timeout(1200)
 
         popup = await page.evaluate(_EXTRACT_POPUP_JS)
 
