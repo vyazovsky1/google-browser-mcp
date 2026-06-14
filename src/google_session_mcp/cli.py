@@ -153,10 +153,10 @@ async def _do_calendar_list(profile, start, end) -> int:
         await session.aclose()
 
 
-async def _do_calendar_get(profile, event_id) -> int:
+async def _do_calendar_get(profile, event_id, start) -> int:
     session = BrowserSession(profile)
     try:
-        result = await calendar.get_event(session, event_id)
+        result = await calendar.get_event(session, event_id, start)
         print(f"Title:       {result.get('title')}")
         print(f"When:        {result.get('when')}")
         print(f"Organizer:   {result.get('organizer')}")
@@ -257,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cg = sub.add_parser("calendar-get", help="get full event details (Meet link, attendees, etc.)")
     cg.add_argument("--id", required=True, dest="event_id", help="event id from calendar-list")
+    cg.add_argument("--start", default=None, help="event start datetime from calendar-list (required for one-time events)")
 
     cc = sub.add_parser("calendar-create", help="create a calendar event")
     cc.add_argument("--title",       required=True)
@@ -299,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
         if cmd == "calendar-list":
             return asyncio.run(_do_calendar_list(eff, args.start, args.end))
         if cmd == "calendar-get":
-            return asyncio.run(_do_calendar_get(eff, args.event_id))
+            return asyncio.run(_do_calendar_get(eff, args.event_id, args.start))
         if cmd == "calendar-create":
             return asyncio.run(_do_calendar_create(eff, args.title, args.start,
                                                     args.end, args.description))

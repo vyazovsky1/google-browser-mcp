@@ -18,7 +18,7 @@ Works on corporate Workspace tenants that enforce Context-Aware Access: a one-ti
 | Tool | What it does |
 |------|--------------|
 | `calendar_list_events(start, end)` | List events in a date range; returns `id`, `title`, `start`, `end`, `all_day`, `has_video_conf`, `rsvp`. |
-| `calendar_get_event(event_id)` | Full event details: `title`, `when`, `meet_link`, `phone`, `organizer`, `attendees`, `description`. Use the `id` from `calendar_list_events`. |
+| `calendar_get_event(event_id, start?)` | Full event details: `title`, `when`, `meet_link`, `phone`, `organizer`, `attendees`, `description`. Use the `id` and `start` from `calendar_list_events`. `start` is required for one-time events (whose id has no date suffix). |
 | `calendar_create_event(title, start, end, description?)` | Create an event. `start`/`end` are ISO datetime strings (`"2026-07-01T14:00:00"`) or date strings for all-day events (`"2026-07-01"`). |
 | `calendar_delete_event(event_id)` | Delete an event by id. |
 

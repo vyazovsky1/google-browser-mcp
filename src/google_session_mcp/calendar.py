@@ -457,7 +457,8 @@ _EXTRACT_POPUP_JS = """() => {
 
 # Lines to discard entirely when parsing the popup innerText.
 _SKIP_LINES = {
-    "close", "edit event", "options", "going?", "yes", "no", "maybe",
+    "close", "edit event", "delete event", "email event details",
+    "options", "going?", "yes", "no", "maybe",
     "content_copy", "launch", "edit_off", "bedtime", "arrow_drop_down",
     "organizer", "awaiting", "-", "edit",
     "remove from this calendar", "chat with guests", "email guests",
@@ -465,6 +466,10 @@ _SKIP_LINES = {
     "join with google meet", "more phone numbers",
     "gemini meeting notes are off", "ask the organizer to turn them on",
     "home", "office", "optional", "event",
+    # meeting-notes section noise
+    "description", "description:", "notes",
+    "take meeting notes", "start a new document to capture notes",
+    "more meeting notes options",
 }
 _SKIP_PREFIXES = (
     "15 minutes", "outside working hours", "declined because",
@@ -548,6 +553,7 @@ def _parse_popup_text(inner: str, meet_link: str | None, phone: str | None) -> d
 async def get_event(
     session,
     event_id: str,
+    start: str | None = None,
     *,
     settle_ms: int = DEFAULT_SETTLE_MS,
 ) -> dict[str, Any]:
@@ -557,20 +563,29 @@ async def get_event(
     base64-decoding all ``data-eventid`` attributes, clicks it, and parses
     the resulting detail popup.
 
-    `event_id` is the id returned by ``list_events``
-    (e.g. ``"1q199encm65hkthi6mvsl5edgm_20260615T140000Z"``).
+    `event_id` is the id returned by ``list_events``.
+    `start` is the event's start datetime from ``list_events`` — required for
+    one-time events whose id has no date suffix; optional for recurring events.
 
     Returns a dict with: ``title``, ``when``, ``meet_link``, ``phone``,
     ``location``, ``organizer``, ``attendees``, ``description``.
     """
+    # Derive the week to navigate to: prefer explicit start, fall back to id suffix.
     m = _EVENT_DATE_RE.search(event_id)
-    if not m:
+    if m:
+        date_str = m.group(1)
+        year, month, day = int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8])
+    elif start:
+        try:
+            dt = _parse_date(start)
+            year, month, day = dt.year, dt.month, dt.day
+        except ValueError as exc:
+            raise CalendarError(f"Invalid start date {start!r}: {exc}") from exc
+    else:
         raise CalendarError(
-            f"Cannot determine date from event_id {event_id!r}. "
-            "Expected format: <id>_YYYYMMDD[T...]"
+            f"Cannot determine week for event_id {event_id!r}: no date suffix. "
+            "Pass start=<ISO date from calendar_list_events>."
         )
-    date_str = m.group(1)
-    year, month, day = int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8])
     week_url = f"{CALENDAR_BASE}/week/{year}/{month}/{day}"
 
     async with session.lock:

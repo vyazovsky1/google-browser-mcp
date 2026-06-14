@@ -145,17 +145,20 @@ async def calendar_create_event(
 async def calendar_get_event(
     ctx: Context,
     event_id: str,
+    start: str | None = None,
 ) -> dict[str, Any]:
     """Get full details for a calendar event: Meet link, attendees, description, phone.
 
     Args:
-        event_id: The event id returned by ``calendar_list_events``
-            (e.g. ``"1q199encm65hkthi6mvsl5edgm_20260615T140000Z"``).
+        event_id: The event id returned by ``calendar_list_events``.
+        start: The event's ``start`` value from ``calendar_list_events``.
+            Required for one-time events (whose id has no date suffix);
+            optional for recurring events.
 
     Returns: ``title``, ``when``, ``meet_link``, ``phone``, ``location``,
     ``organizer``, ``attendees`` (list of names), ``description``, ``raw_text``.
     """
-    return await calendar.get_event(_session(ctx), event_id)
+    return await calendar.get_event(_session(ctx), event_id, start)
 
 
 @mcp.tool()
