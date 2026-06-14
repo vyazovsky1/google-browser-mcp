@@ -152,6 +152,24 @@ async def _do_calendar_list(profile, start, end) -> int:
         await session.aclose()
 
 
+async def _do_calendar_get(profile, event_id) -> int:
+    session = BrowserSession(profile)
+    try:
+        result = await calendar.get_event(session, event_id)
+        print(f"Title:       {result.get('title')}")
+        print(f"When:        {result.get('when')}")
+        print(f"Organizer:   {result.get('organizer')}")
+        print(f"Meet link:   {result.get('meet_link')}")
+        print(f"Phone:       {result.get('phone')}")
+        print(f"Location:    {result.get('location')}")
+        print(f"Description: {result.get('description')}")
+        attendees = result.get('attendees') or []
+        print(f"Attendees ({len(attendees)}): {', '.join(attendees)}")
+        return 0
+    finally:
+        await session.aclose()
+
+
 async def _do_calendar_create(profile, title, start, end, description) -> int:
     session = BrowserSession(profile)
     try:
@@ -236,6 +254,9 @@ def main(argv: list[str] | None = None) -> int:
     cl.add_argument("--start", required=True, help="ISO date or datetime, e.g. 2026-06-01")
     cl.add_argument("--end",   required=True, help="ISO date or datetime, e.g. 2026-06-30")
 
+    cg = sub.add_parser("calendar-get", help="get full event details (Meet link, attendees, etc.)")
+    cg.add_argument("--id", required=True, dest="event_id", help="event id from calendar-list")
+
     cc = sub.add_parser("calendar-create", help="create a calendar event")
     cc.add_argument("--title",       required=True)
     cc.add_argument("--start",       required=True, help="ISO datetime, e.g. 2026-07-01T12:00:00")
@@ -276,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_do_selftest(eff, args.query))
         if cmd == "calendar-list":
             return asyncio.run(_do_calendar_list(eff, args.start, args.end))
+        if cmd == "calendar-get":
+            return asyncio.run(_do_calendar_get(eff, args.event_id))
         if cmd == "calendar-create":
             return asyncio.run(_do_calendar_create(eff, args.title, args.start,
                                                     args.end, args.description))

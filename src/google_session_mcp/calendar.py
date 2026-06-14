@@ -13,6 +13,7 @@ session cookies are scoped to .google.com, so no extra auth is needed.
 from __future__ import annotations
 
 import json
+import re as _re
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
@@ -412,3 +413,193 @@ async def delete_event(
                 continue
 
     return {"status": "deleted", "id": event_id}
+
+
+# ---------------------------------------------------------------------------
+# get_event
+# ---------------------------------------------------------------------------
+
+_EVENT_DATE_RE = _re.compile(r"_(\d{8})")
+
+# Find the chip whose base64-decoded data-eventid starts with the given event_id,
+# scroll it into view, and click it. Returns the decoded value or null.
+_FIND_AND_CLICK_CHIP_JS = """(eid) => {
+    function b64decode(s) {
+        try { return atob(s.replace(/-/g, '+').replace(/_/g, '/')); } catch(e) { return ''; }
+    }
+    for (const c of document.querySelectorAll('[data-eventid]')) {
+        const dec = b64decode(c.getAttribute('data-eventid'));
+        if (dec.startsWith(eid)) {
+            c.scrollIntoView({block: 'center'});
+            c.click();
+            return dec;
+        }
+    }
+    return null;
+}"""
+
+# Extract structured data from the event detail popup.
+_EXTRACT_POPUP_JS = """() => {
+    const d = document.querySelector('[role=dialog]');
+    if (!d) return null;
+    const meetEl  = d.querySelector('a[href*="meet.google.com"]');
+    const phoneEl = d.querySelector('a[href^="tel:"]');
+    return {
+        inner:      d.innerText.substring(0, 4000),
+        meet_link:  meetEl  ? meetEl.href.split('?')[0]             : null,
+        phone:      phoneEl ? phoneEl.href.replace('tel:', '').trim() : null,
+        links: Array.from(d.querySelectorAll('a[href]')).map(a => ({
+            text: a.textContent.trim().substring(0, 60),
+            href: a.href.substring(0, 150),
+        })),
+    };
+}"""
+
+# Lines to discard entirely when parsing the popup innerText.
+_SKIP_LINES = {
+    "close", "edit event", "options", "going?", "yes", "no", "maybe",
+    "content_copy", "launch", "edit_off", "bedtime", "arrow_drop_down",
+    "organizer", "awaiting", "-", "edit",
+    "remove from this calendar", "chat with guests", "email guests",
+    "copy guest emails", "copy conference info", "join by phone",
+    "join with google meet", "more phone numbers",
+    "gemini meeting notes are off", "ask the organizer to turn them on",
+    "home", "office", "optional", "event",
+}
+_SKIP_PREFIXES = (
+    "15 minutes", "outside working hours", "declined because",
+    "going?", "meet.google.com",
+)
+# Matches phone number / bidirectional-text lines produced by Calendar.
+_PHONE_LINE_RE = _re.compile(r"[‪‬]|^\(.*\d{3}.*\d{4}|^pin\s*:", _re.I)
+
+
+def _parse_popup_text(inner: str, meet_link: str | None, phone: str | None) -> dict[str, Any]:
+    lines = [l.strip() for l in inner.split("\n") if l.strip()]
+
+    def _skip(line: str) -> bool:
+        ll = line.lower()
+        if ll in _SKIP_LINES:
+            return True
+        if any(ll.startswith(p) for p in _SKIP_PREFIXES):
+            return True
+        if _PHONE_LINE_RE.search(line):
+            return True
+        return False
+
+    content = [l for l in lines if not _skip(l)]
+
+    result: dict[str, Any] = {
+        "title": None,
+        "when": None,
+        "meet_link": meet_link,
+        "phone": phone,
+        "location": None,
+        "organizer": None,
+        "attendees": [],
+        "description": None,
+    }
+
+    in_guests = False
+    skip_next = False
+    for i, line in enumerate(content):
+        if skip_next:
+            skip_next = False
+            continue
+
+        # Date/time line — contains a middle-dot or en-dash
+        if result["when"] is None and ("⋅" in line or "–" in line):
+            result["when"] = line
+            continue
+
+        # Title — first surviving line
+        if result["title"] is None:
+            result["title"] = line
+            continue
+
+        # "N guests" starts the attendee block
+        if _re.search(r"\d+ guest", line.lower()):
+            in_guests = True
+            continue
+
+        # RSVP summary ("1 yes", "5 awaiting"…) — skip
+        if in_guests and _re.match(r"^\d+ ", line):
+            continue
+
+        # "Organizer: Name" — extract name, skip the repeated name on next line
+        if line.lower().startswith("organizer:"):
+            result["organizer"] = line.split(":", 1)[1].strip()
+            skip_next = True
+            continue
+
+        if in_guests:
+            result["attendees"].append(line)
+            continue
+
+        # Anything else before the guest block is description / location
+        if result["description"] is None:
+            result["description"] = line
+        else:
+            result["description"] += "\n" + line
+
+    return result
+
+
+async def get_event(
+    session,
+    event_id: str,
+    *,
+    settle_ms: int = DEFAULT_SETTLE_MS,
+) -> dict[str, Any]:
+    """Get full event details by clicking the event chip in the Calendar UI.
+
+    Navigates to the week view containing the event, finds the chip by
+    base64-decoding all ``data-eventid`` attributes, clicks it, and parses
+    the resulting detail popup.
+
+    `event_id` is the id returned by ``list_events``
+    (e.g. ``"1q199encm65hkthi6mvsl5edgm_20260615T140000Z"``).
+
+    Returns a dict with: ``title``, ``when``, ``meet_link``, ``phone``,
+    ``location``, ``organizer``, ``attendees``, ``description``.
+    """
+    m = _EVENT_DATE_RE.search(event_id)
+    if not m:
+        raise CalendarError(
+            f"Cannot determine date from event_id {event_id!r}. "
+            "Expected format: <id>_YYYYMMDD[T...]"
+        )
+    date_str = m.group(1)
+    year, month, day = int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8])
+    week_url = f"{CALENDAR_BASE}/week/{year}/{month}/{day}"
+
+    async with session.lock:
+        ctx  = await session.context()
+        page = await session.page()
+
+        await page.goto(week_url, wait_until="domcontentloaded")
+        if any(m2 in page.url for m2 in LOGIN_HOST_MARKERS):
+            raise SessionExpiredError(
+                "Calendar redirected to login. Run `google-browser-mcp login`."
+            )
+        await page.wait_for_timeout(settle_ms)
+
+        clicked = await page.evaluate(_FIND_AND_CLICK_CHIP_JS, event_id)
+        if not clicked:
+            raise CalendarError(
+                f"Event chip '{event_id}' not found in the week view "
+                f"({year}-{month:02d}-{day:02d}). "
+                "The event may be outside the visible calendar range."
+            )
+        await page.wait_for_timeout(2000)
+
+        popup = await page.evaluate(_EXTRACT_POPUP_JS)
+
+    if not popup:
+        raise CalendarError(
+            "Event detail popup did not appear after clicking the chip."
+        )
+
+    result = _parse_popup_text(popup["inner"], popup["meet_link"], popup["phone"])
+    result["raw_text"] = popup["inner"]
+    return result
