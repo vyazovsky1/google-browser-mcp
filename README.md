@@ -61,8 +61,9 @@ A visible Chromium opens. Complete the full corporate SSO, confirm you can see D
 ## Verify it works
 
 ```powershell
-# Drive smoke test (search + fetch)
-google-browser-mcp selftest --query report
+# Drive
+google-browser-mcp drive-search --query "report" --type document
+google-browser-mcp drive-fetch --id <file-id> --format pdf
 
 # Calendar
 google-browser-mcp calendar-list --start 2026-06-01 --end 2026-06-30

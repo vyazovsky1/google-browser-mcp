@@ -20,25 +20,6 @@ from .browser import BrowserSession
 from .errors import GoogleError, NotLoggedInError, SessionExpiredError
 from .login import run_login
 
-FOLDER_MIME = "application/vnd.google-apps.folder"
-
-
-# ---------------------------------------------------------------------------
-# Drive helpers (unchanged from original)
-# ---------------------------------------------------------------------------
-
-def _fetchable(results: list[dict]) -> tuple[dict | None, dict | None]:
-    native = next((r for r in results if r.get("export_format")), None)
-    binary = next(
-        (r for r in results
-         if r["mimeType"]
-         and r["mimeType"] != FOLDER_MIME
-         and not r["mimeType"].startswith("application/vnd.google-apps")),
-        None,
-    )
-    return native, binary
-
-
 def _print_drive_results(results: list[dict], limit: int = 20) -> None:
     print(f"{len(results)} result(s):")
     for r in results[:limit]:
@@ -102,45 +83,6 @@ async def _do_drive_fetch(profile, file_id, dest, fmt, mime, modified, name) -> 
     finally:
         await session.aclose()
 
-
-async def _do_selftest(profile, query) -> int:
-    session = BrowserSession(profile)
-    try:
-        print(f"[selftest] profile: {session.profile}")
-        health = await session.health()
-        print(f"[selftest] health: {health}")
-        if not health["drive_reachable"]:
-            print("[selftest] NOT reachable — session likely expired. Run `login`.")
-            return 2
-
-        results = await drive.search(session, query)
-        print(f"[selftest] search('{query}') -> {len(results)} files")
-        _print_drive_results(results, limit=5)
-        if not results:
-            print("[selftest] no results; search path OK but nothing to fetch.")
-            return 0
-
-        native, binary = _fetchable(results)
-        targets = [t for t in (native, binary) if t]
-        if not targets:
-            print("[selftest] results were all folders; rerun with a query that "
-                  "matches files, e.g. --query type:document")
-            return 0
-
-        rc = 0
-        for t in targets:
-            kind = "native-export" if t.get("export_format") else "binary"
-            info = await drive.fetch(session, t["id"],
-                                     export_format=t.get("export_format"),
-                                     mime_type=t["mimeType"],
-                                     name=t.get("name"))
-            on_disk = Path(info["path"]).exists() and info["bytes"] > 0
-            print(f"[selftest] {kind}: {t['name']} -> {info}")
-            print(f"[selftest]   on disk: {'YES' if on_disk else 'NO'}")
-            rc = rc or (0 if on_disk else 1)
-        return rc
-    finally:
-        await session.aclose()
 
 
 async def _do_calendar_list(profile, start, end) -> int:
@@ -234,21 +176,18 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("serve", help="run the MCP stdio server (default)")
 
     # Drive
-    sc = sub.add_parser("search", help="search Drive and print results")
+    sc = sub.add_parser("drive-search", help="search Drive and print results")
     sc.add_argument("--query", required=True)
     sc.add_argument("--type", dest="ftype")
     sc.add_argument("--limit", type=int, default=drive.DEFAULT_SEARCH_LIMIT)
 
-    fc = sub.add_parser("fetch", help="download one Drive file by id")
+    fc = sub.add_parser("drive-fetch", help="download one Drive file by id")
     fc.add_argument("--id", required=True)
     fc.add_argument("--dest")
     fc.add_argument("--format", dest="fmt")
     fc.add_argument("--mime")
     fc.add_argument("--modified")
     fc.add_argument("--name")
-
-    st = sub.add_parser("selftest", help="headless Drive search+fetch smoke test")
-    st.add_argument("--query", default="report")
 
     # Calendar
     cl = sub.add_parser("calendar-list", help="list calendar events in a date range")
@@ -290,13 +229,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if cmd == "login":
             return run_login(profile)
-        if cmd == "search":
+        if cmd == "drive-search":
             return asyncio.run(_do_drive_search(eff, args.query, args.ftype, args.limit))
-        if cmd == "fetch":
+        if cmd == "drive-fetch":
             return asyncio.run(_do_drive_fetch(eff, args.id, args.dest, args.fmt,
                                                args.mime, args.modified, args.name))
-        if cmd == "selftest":
-            return asyncio.run(_do_selftest(eff, args.query))
         if cmd == "calendar-list":
             return asyncio.run(_do_calendar_list(eff, args.start, args.end))
         if cmd == "calendar-get":
