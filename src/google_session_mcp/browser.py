@@ -71,8 +71,13 @@ class BrowserSession:
         if self._headed:
             launch_kwargs["headless"] = False
         else:
-            launch_kwargs["headless"] = False
-            args.append("--headless=new")
+            # channel="chromium" + headless=True selects Chrome's *new* headless
+            # mode — the one that looks like a real browser and survives corporate
+            # Context-Aware Access. This is the documented, non-crashing way to get
+            # new headless in Playwright; the older headless=False + "--headless=new"
+            # hack triggers a launch-time TargetClosedError on this Playwright build.
+            launch_kwargs["channel"] = "chromium"
+            launch_kwargs["headless"] = True
 
         self._pw = await async_playwright().start()
         self._ctx = await self._pw.chromium.launch_persistent_context(**launch_kwargs)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import sys
 
@@ -170,6 +171,9 @@ def main(argv: list[str] | None = None) -> int:
         description="Browser-session Google Workspace MCP server (Drive, Calendar, Gmail).",
     )
     p.add_argument("--profile", help="persistent browser profile dir (overrides GOOGLE_MCP_PROFILE)")
+    p.add_argument("--log-level", default="WARNING",
+                   choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                   help="logging verbosity (default: WARNING)")
     sub = p.add_subparsers(dest="cmd")
 
     sub.add_parser("login", help="open a visible browser to authenticate once")
@@ -218,6 +222,13 @@ def main(argv: list[str] | None = None) -> int:
     gd.add_argument("--body",    required=True)
 
     args = p.parse_args(argv)
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+
     profile = Path(args.profile).expanduser() if args.profile else None
     cmd = args.cmd or "serve"
 

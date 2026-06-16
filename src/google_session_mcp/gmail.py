@@ -12,12 +12,15 @@ JS-bundle API (which changes with each deploy) to reduce fragility.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 from urllib.parse import quote
 
 from .browser import LOGIN_HOST_MARKERS
 from .errors import GmailError, SessionExpiredError
+
+logger = logging.getLogger(__name__)
 
 GMAIL_BASE     = "https://mail.google.com/mail/u/0"
 GMAIL_SEARCH   = GMAIL_BASE + "/#search/{q}"
@@ -116,13 +119,18 @@ async def search(
     # Do NOT percent-encode the query — Gmail's hash-fragment router treats
     # %3A differently from :, breaking operators like "in:inbox".
     url = f"{GMAIL_BASE}/#search/{query}"
+    logger.debug("search: navigating to %s", url)
 
     async with session.lock:
         ctx  = await session.context()
         page = await session.page()
 
         await page.goto(url, wait_until="domcontentloaded")
-        if any(m in page.url for m in LOGIN_HOST_MARKERS):
+        logger.debug("search: landed on %s (title=%r)", page.url, await page.title())
+
+        matched = [m for m in LOGIN_HOST_MARKERS if m in page.url]
+        if matched:
+            logger.debug("search: login markers matched %s in url", matched)
             raise SessionExpiredError(
                 "Gmail redirected to login. Run `google-browser-mcp login`."
             )
@@ -130,13 +138,26 @@ async def search(
         # Wait for the thread-list rows to render before extracting.
         try:
             await page.wait_for_selector("tr.zA", timeout=10_000)
+            logger.debug("search: tr.zA selector appeared")
         except Exception:
-            pass  # empty inbox or slow load — try extracting anyway
+            logger.debug("search: tr.zA selector timed out; extracting anyway")
 
         threads: list[dict] = await page.evaluate(_EXTRACT_THREADS_JS)
+        logger.debug("search: extracted %d raw thread rows", len(threads))
+
+        if logger.isEnabledFor(logging.DEBUG):
+            counts = await page.evaluate(
+                "() => ({zA: document.querySelectorAll('tr.zA').length,"
+                " tr: document.querySelectorAll('tr').length,"
+                " legacyId: document.querySelectorAll('[data-legacy-thread-id]').length})"
+            )
+            logger.debug("search: DOM counts %s", counts)
+            for t in threads[:3]:
+                logger.debug("search: sample id=%r subject=%r", t.get("id"), t.get("subject"))
 
     # Filter out rows with no id (rendering artifacts)
     threads = [t for t in threads if t.get("id")]
+    logger.debug("search: %d threads after id filter", len(threads))
     return threads[:max_results]
 
 

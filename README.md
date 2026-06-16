@@ -2,7 +2,7 @@
 
 A Model Context Protocol (MCP) server that gives Claude access to **Google Drive, Calendar, and Gmail** by reusing a browser session you authenticate once — with **no OAuth2 client credentials and no GCP project**.
 
-Works on corporate Workspace tenants that enforce Context-Aware Access: a one-time `login` opens a visible browser for the full SSO / 2SV / device-trust flow, and the persisted Playwright profile *is* the token. At runtime the server reuses that profile **headless and silent** (`--headless=new`), so no window ever appears.
+Works on corporate Workspace tenants that enforce Context-Aware Access: a one-time `login` opens a visible browser for the full SSO / 2SV / device-trust flow, and the persisted Playwright profile *is* the token. At runtime the server reuses that profile **headless and silent** (Chrome's new headless mode via Playwright's `channel="chromium"`), so no window ever appears.
 
 ## Tools
 
@@ -57,6 +57,8 @@ A visible Chromium opens. Complete the full corporate SSO, confirm you can see D
 | `GOOGLE_MCP_DOWNLOAD_DIR` | `%USERPROFILE%\Downloads\google-session-mcp` | Default destination for Drive fetches. |
 
 `--profile <dir>` on any command overrides `GOOGLE_MCP_PROFILE`.
+
+`--log-level <DEBUG|INFO|WARNING|ERROR|CRITICAL>` on any command sets logging verbosity (default `WARNING`); use `--log-level DEBUG` to trace navigation, redirects, and DOM extraction on stderr.
 
 ## Verify it works
 

@@ -1,7 +1,7 @@
-"""Drive operations: search (page-nav + response intercept) and fetch.
+"""Drive operations: search (page-nav + DOM extraction) and fetch.
 
   * search    -> navigate the headless page to drive.google.com/drive/search?q=...
-                 and intercept the internal files-list JSON (HTTP 200).
+                 and extract the result rows from the rendered DOM.
   * export    -> docs.google.com/.../export?format=...   (Google-native docs)
   * download  -> drive.google.com/uc?id=...&export=download   (binary files)
 """
@@ -9,13 +9,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from . import config
-from .browser import LOGIN_HOST_MARKERS
 from .errors import (
     AccessDeniedError,
     DriveError,
@@ -23,18 +23,9 @@ from .errors import (
     SessionExpiredError,
 )
 
+logger = logging.getLogger(__name__)
+
 SEARCH_URL = "https://drive.google.com/drive/search?q={q}"
-
-SEARCH_RPC_MARKER = "SearchItems"
-
-_ROW_ID = 0
-_ROW_PARENTS = 1
-_ROW_NAME = 2
-_ROW_MIME = 3
-_ROW_MODIFIED_MS = 10
-
-_ID_RE = re.compile(r"^[A-Za-z0-9_-]{20,}$")
-
 GOOGLE_NATIVE: dict[str, tuple[str, str]] = {
     "application/vnd.google-apps.document": (
         "pdf",
@@ -68,67 +59,6 @@ def search_url(query: str, filters: dict[str, Any] | None = None) -> str:
     return SEARCH_URL.format(q=quote(build_query(query, filters)))
 
 
-def parse_protojson(body: bytes) -> Any:
-    raw = body.decode("utf-8", "ignore")
-    for prefix in (")]}'\n", ")]}'"):
-        if raw.startswith(prefix):
-            raw = raw[len(prefix):]
-            break
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-
-
-def _looks_like_row(node: Any) -> bool:
-    return (
-        isinstance(node, list)
-        and len(node) > _ROW_MIME
-        and isinstance(node[_ROW_ID], str)
-        and _ID_RE.match(node[_ROW_ID]) is not None
-        and isinstance(node[_ROW_NAME], str)
-        and isinstance(node[_ROW_MIME], str)
-        and "/" in node[_ROW_MIME]
-    )
-
-
-def find_rows(node: Any, out: list[list]) -> None:
-    if _looks_like_row(node):
-        out.append(node)
-    elif isinstance(node, list):
-        for child in node:
-            find_rows(child, out)
-
-
-def _ms_to_iso(value: Any) -> str | None:
-    if not isinstance(value, (int, float)) or value <= 0:
-        return None
-    from datetime import datetime, timezone
-    return datetime.fromtimestamp(value / 1000, tz=timezone.utc).isoformat()
-
-
-def _folder_of_row(row: list) -> str | None:
-    parents = row[_ROW_PARENTS] if len(row) > _ROW_PARENTS else None
-    if isinstance(parents, list) and parents and isinstance(parents[0], str):
-        return parents[0]
-    return None
-
-
-def normalize_row(row: list) -> dict[str, Any]:
-    mime = row[_ROW_MIME] if len(row) > _ROW_MIME else ""
-    native = GOOGLE_NATIVE.get(mime)
-    modified = row[_ROW_MODIFIED_MS] if len(row) > _ROW_MODIFIED_MS else None
-    return {
-        "id": row[_ROW_ID],
-        "name": row[_ROW_NAME] or "(untitled)",
-        "mimeType": mime,
-        "owner": None,
-        "folder": _folder_of_row(row),
-        "modified": _ms_to_iso(modified),
-        "export_format": native[0] if native else None,
-    }
-
-
 def looks_like_login_page(body: bytes, headers: dict) -> bool:
     ctype = (headers.get("content-type", "") or "").lower()
     if "text/html" not in ctype:
@@ -138,6 +68,54 @@ def looks_like_login_page(body: bytes, headers: dict) -> bool:
 
 
 DEFAULT_SEARCH_LIMIT = 20
+
+# Ordered longest-first so "Shared folder" matches before "Folder".
+_DOM_MIME_PAIRS = [
+    (" Google Docs", "application/vnd.google-apps.document"),
+    (" Google Sheets", "application/vnd.google-apps.spreadsheet"),
+    (" Google Slides", "application/vnd.google-apps.presentation"),
+    (" Google Forms", "application/vnd.google-apps.form"),
+    (" Google Drawings", "application/vnd.google-apps.drawing"),
+    (" Shared folder", "application/vnd.google-apps.folder"),
+    (" Folder", "application/vnd.google-apps.folder"),
+    (" PDF", "application/pdf"),
+    (" Microsoft Word", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    (" Microsoft Excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    (" Microsoft PowerPoint", "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+]
+
+_DOM_EXTRACT_JS = (
+    "() => {"
+    "const PAIRS=" + json.dumps(_DOM_MIME_PAIRS) + ";"
+    "const seen=new Set(),results=[];"
+    "document.querySelectorAll('tr[data-id]').forEach(tr=>{"
+    "  const id=tr.getAttribute('data-id');"
+    "  if(seen.has(id))return; seen.add(id);"
+    "  const el=tr.querySelector('[aria-label]');"
+    "  const label=el?el.getAttribute('aria-label'):'';"
+    "  let name=label,mime='';"
+    "  for(const [s,m] of PAIRS){"
+    "    const i=label.indexOf(s);"
+    "    if(i>0){name=label.substring(0,i).trim();mime=m;break;}"
+    "  }"
+    "  results.push({id,name:name||'(untitled)',mimeType:mime});"
+    "});"
+    "return results;}"
+)
+
+
+def _dom_item_to_result(item: dict) -> dict[str, Any]:
+    mime = item.get("mimeType", "")
+    native = GOOGLE_NATIVE.get(mime)
+    return {
+        "id": item["id"],
+        "name": item["name"] or "(untitled)",
+        "mimeType": mime,
+        "owner": None,
+        "folder": None,
+        "modified": None,
+        "export_format": native[0] if native else None,
+    }
 
 
 async def search(
@@ -149,51 +127,48 @@ async def search(
     settle_ms: int = 6000,
 ) -> list[dict[str, Any]]:
     limit = max(1, int(limit))
+    url = search_url(query, filters)
+    logger.debug("search: navigating to %s", url)
     async with session.lock:
-        ctx = await session.context()
         page = await session.page()
 
+        await page.goto(url, wait_until="domcontentloaded")
+        logger.debug("search: landed on %s (title=%r)", page.url, await page.title())
+        # Check the URL *host* — not a substring of the whole URL. A login
+        # redirect embeds the original drive.google.com URL in its `continue=`
+        # query param, so a naive "drive.google.com in url" test is fooled.
+        host = urlparse(page.url).netloc
+        if host != "drive.google.com":
+            raise SessionExpiredError(
+                f"Drive redirected to {host}. "
+                "Run `google-browser-mcp login` and retry."
+            )
+        await page.wait_for_timeout(settle_ms)
+
         seen_ids: set[str] = set()
-        rows: list[list] = []
+        rows: list[dict[str, Any]] = []
 
-        async def on_response(resp) -> None:
-            if SEARCH_RPC_MARKER not in resp.url:
-                return
-            try:
-                body = await resp.body()
-            except Exception:
-                return
-            data = parse_protojson(body)
-            if data is None:
-                return
-            found: list[list] = []
-            find_rows(data, found)
-            for r in found:
-                fid = r[_ROW_ID]
-                if fid not in seen_ids:
-                    seen_ids.add(fid)
-                    rows.append(r)
+        def _collect(items: list) -> None:
+            for item in items:
+                if item["id"] not in seen_ids:
+                    seen_ids.add(item["id"])
+                    rows.append(_dom_item_to_result(item))
 
-        ctx.on("response", on_response)
-        try:
-            await page.goto(search_url(query, filters), wait_until="domcontentloaded")
-            if any(m in page.url for m in LOGIN_HOST_MARKERS):
-                raise SessionExpiredError(
-                    "Drive redirected to login. Run `google-browser-mcp login` and retry."
-                )
-            await page.wait_for_timeout(settle_ms)
+        _collect(await page.evaluate(_DOM_EXTRACT_JS))
+        logger.debug("search: %d rows after initial extract", len(rows))
 
-            stagnant = 0
-            while len(rows) < limit and stagnant < 3:
-                before = len(rows)
-                await page.mouse.move(640, 400)
-                await page.mouse.wheel(0, 6000)
-                await page.wait_for_timeout(1500)
-                stagnant = stagnant + 1 if len(rows) <= before else 0
-        finally:
-            ctx.remove_listener("response", on_response)
+        stagnant = 0
+        while len(rows) < limit and stagnant < 3:
+            before = len(rows)
+            await page.mouse.move(640, 400)
+            await page.mouse.wheel(0, 6000)
+            await page.wait_for_timeout(1500)
+            _collect(await page.evaluate(_DOM_EXTRACT_JS))
+            logger.debug("search: %d rows after scroll (stagnant=%d)", len(rows), stagnant)
+            stagnant = stagnant + 1 if len(rows) <= before else 0
 
-        return [normalize_row(r) for r in rows[:limit]]
+        logger.debug("search: returning %d rows", min(len(rows), limit))
+        return rows[:limit]
 
 
 METADATA_FILENAME = ".drive_metadata.json"
